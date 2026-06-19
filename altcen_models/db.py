@@ -1,0 +1,540 @@
+from datetime import datetime
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Integer,
+    Interval,
+    ForeignKey,
+    String,
+    Table,
+    UniqueConstraint,
+    ARRAY,
+    BigInteger,
+    JSON,
+    func,
+    event,
+)
+from sqlalchemy.orm import declarative_base, relationship, column_property, Session
+from sqlalchemy.ext.hybrid import hybrid_method, hybrid_property
+from sqlalchemy.ext.mutable import MutableDict
+
+Base = declarative_base()
+
+
+class MaterializedView(Base):
+    """Abstract base for PostgreSQL materialized-view ORM models.
+
+    Views are populated exclusively by the external scraper process.
+    The before_flush guard below makes accidental writes a hard error.
+    """
+    __abstract__ = True
+
+
+@event.listens_for(Session, 'before_flush')
+def _block_mv_writes(session, ctx, instances):
+    for obj in (*session.new, *session.dirty, *session.deleted):
+        if isinstance(obj, MaterializedView):
+            raise RuntimeError(
+                f"Write to read-only materialized view {type(obj).__tablename__!r} blocked"
+            )
+
+
+class Entity(Base):
+    __tablename__ = "entity"
+    id = Column(Integer, primary_key=True, nullable=False)
+    type = Column(String, nullable=False)
+    prev = Column(DateTime, nullable=True)
+    extractor_key = Column(String, nullable=False)
+    extractor_data = Column(String, nullable=False)
+    allow = Column(Boolean, nullable=False, default=True)
+    title = Column(String, nullable=True)
+    views = Column(Integer, nullable=True)
+    likes = Column(Integer, nullable=True)
+    dislikes = Column(Integer, nullable=True)
+    yt_comments = Column(Integer, nullable=True)
+    yt_views = Column(Integer, nullable=True)
+    yt_dislikes = Column(Integer, nullable=True)
+    yt_likes = Column(Integer, nullable=True)
+    published = Column(DateTime, nullable=True)
+    description = Column(String, nullable=True)
+    tags = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    rating = Column(Integer, nullable=True)
+    thumbnail = Column(String, nullable=True)
+    thumbnail_ac = Column(String, nullable=True)
+    yt_error_message = Column(String, nullable=True)
+    duration = Column(Integer, nullable=True)
+    sync_ia = Column(Boolean, nullable=True)
+    exists_ia = Column(Boolean, nullable=True)
+    yt_deleted = Column(Boolean, nullable=True)
+    yt_deleted_date = Column(DateTime, nullable=True)
+    sync_iadate = Column(DateTime, nullable=True)
+    addeddate = Column(DateTime, nullable=True)
+    filesize_approx = Column(Integer, nullable=True)
+    live_status = Column(String, nullable=True)
+    restricted_ia = Column(Boolean, nullable=True)
+    loggedin_ia = Column(Boolean, nullable=True)
+    uploaderother_ia = Column(Boolean, nullable=True)
+    exists_ac = Column(Boolean, nullable=True)
+    dark_ia = Column(Boolean, nullable=True)
+    exists_ac_mkv = Column(Boolean, nullable=True)
+    found = Column(Boolean, nullable=True)
+    yt_limited = Column(Boolean, nullable=True)
+    ac_views = Column(Integer, nullable=True)
+    videofile = Column(String, nullable=True)
+    novideo_ia = Column(Boolean, nullable=True)
+
+    __mapper_args__ = {
+        "polymorphic_on": type,
+        "polymorphic_identity": __tablename__,
+        "with_polymorphic": "*",
+    }
+    __table_args__ = (
+        UniqueConstraint(
+            "extractor_key", "extractor_data", "type", name="_entity_extractor_type"
+        ),
+    )
+
+
+Sources_to_Videos = Table(
+    "content",
+    Base.metadata,
+    Column(
+        "source_id",
+        Integer,
+        ForeignKey("source.id", onupdate="CASCADE", ondelete="CASCADE"),
+        index=True,
+    ),
+    Column(
+        "video_id",
+        Integer,
+        ForeignKey("video.id", onupdate="CASCADE", ondelete="CASCADE"),
+        index=True,
+    ),
+)
+
+
+class Video(Entity):
+    __tablename__ = "video"
+    id = Column(
+        Integer,
+        ForeignKey(
+            f"{Entity.__tablename__}.id",
+            onupdate="CASCADE",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+    sources = relationship(
+        "Source", secondary=Sources_to_Videos, back_populates="videos"
+    )
+    __mapper_args__ = {"polymorphic_identity": __tablename__}
+
+
+class Source(Entity):
+    __tablename__ = "source"
+    id = Column(
+        Integer,
+        ForeignKey(
+            Entity.__tablename__ + ".id", onupdate="CASCADE", ondelete="CASCADE"
+        ),
+        primary_key=True,
+    )
+    next = Column(DateTime, nullable=False, default=datetime.min)
+    delta = Column(Interval, nullable=False)
+    delta_short = column_property(func.to_char(delta, 'ddd'))
+    url = Column(String, nullable=False)
+    extractor_match = Column(String, nullable=False)
+    source_name = Column(String, nullable=True)
+    ytc_etag = Column(String, nullable=True)
+    ytc_id = Column(String, nullable=True)
+    ytc_title = Column(String, nullable=True)
+    ytc_description = Column(String, nullable=True)
+    ytc_customurl = Column(String, nullable=True)
+    ytc_publishedat = Column(DateTime, nullable=True)
+    ytc_thumbnailurl = Column(String, nullable=True)
+    ytc_viewcount = Column(Integer, nullable=True)
+    ytc_subscribercount = Column(Integer, nullable=True)
+    ytc_videocount = Column(Integer, nullable=True)
+    ytc_archive = Column(Boolean, nullable=False, default=False)
+    ytc_deleted = Column(Boolean, nullable=False, default=False)
+    ytc_deleteddate = Column(DateTime, nullable=True)
+    ytc_addeddate = Column(DateTime, nullable=True)
+    ytc_partarchive = Column(Boolean, nullable=False, default=False)
+    ytc_latestarchive = Column(Boolean, nullable=False, default=False)
+    next_resync = Column(DateTime, nullable=True)
+    s3_ia = Column(Boolean, nullable=False, default=False)
+    s3_ac = Column(Boolean, nullable=False, default=False)
+    s3_mirror = Column(Boolean, nullable=False, default=False)
+    was_full = Column(Boolean, nullable=False, default=False)
+    was_part = Column(Boolean, nullable=False, default=False)
+    ytc_thumbnail = Column(String, nullable=True)
+    ytc_moddate = Column(DateTime, nullable=True)
+
+    videos = relationship(
+        "Video", secondary=Sources_to_Videos, back_populates="sources"
+    )
+    __mapper_args__ = {"polymorphic_identity": __tablename__}
+
+    @hybrid_method
+    def videos_total(self):
+        return len(self.videos)
+
+    @hybrid_method
+    def videos_missing(self):
+        return len([video for video in self.videos if video.prev is None])
+
+    @hybrid_method
+    def videos_saved(self):
+        return len([video for video in self.videos if video.prev is not None])
+
+    @hybrid_method
+    def videos_archived(self):
+        return len(
+            [video for video in self.videos if (video.exists_ia or video.exists_ac)]
+        )
+
+    @hybrid_method
+    def videos_deleted(self):
+        return len([video for video in self.videos if video.yt_deleted])
+
+    @hybrid_method
+    def videos_deleted_archived(self):
+        return len(
+            [
+                video
+                for video in self.videos
+                if video.yt_deleted and (video.exists_ia or video.exists_ac)
+            ]
+        )
+
+    @hybrid_method
+    def video_newest(self):
+        return max(
+            [video.published for video in self.videos if video.published is not None],
+            default=datetime(1997, 1, 1),
+        )
+
+    @hybrid_method
+    def videos_live(self):
+        return len([video for video in self.videos if video.live_status is not None])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'ytc_id': self.ytc_id,
+            'ytc_title': self.ytc_title,
+            'allow': format(self.allow),
+            'delta': self.delta_short,
+            'videos_total': self.videos_total(),
+        }
+
+
+class Category(Base):
+    __tablename__ = "category"
+    cat_id = Column(Integer, primary_key=True, unique=True, nullable=False)
+    cat_name = Column(String, unique=True, nullable=False)
+    cat_image = Column(String, nullable=False)
+
+    def __repr__(self):
+        return "<Category %r>" % self.cat_id
+
+
+class Language(Base):
+    __tablename__ = "language"
+    lang_id = Column(Integer, primary_key=True, unique=True, nullable=False)
+    lang_name = Column(String, unique=True, nullable=False)
+    lang_image = Column(String, nullable=False)
+    lang_tagstring = Column(String, nullable=False)
+    lang_code = Column(String, nullable=False)
+    lang_image_css = Column(String, nullable=False)
+
+    def __repr__(self):
+        return "<Language %r>" % self.lang_id
+
+
+class Translation(Base):
+    __tablename__ = "translation"
+    varname = Column(String, primary_key=True, nullable=False)
+    en = Column(String, nullable=False)
+    de = Column(String, nullable=True)
+    es = Column(String, nullable=True)
+    fr = Column(String, nullable=True)
+    pt = Column(String, nullable=True)
+    nl = Column(String, nullable=True)
+    it = Column(String, nullable=True)
+    se = Column(String, nullable=True)
+
+
+class Counter(Base):
+    __tablename__ = "counter"
+    hash = Column(BigInteger, primary_key=True, nullable=False)
+
+
+class User(Base):
+    __tablename__ = "altcen_user"
+    id = Column(Integer, primary_key=True, nullable=False)
+    email = Column(String, nullable=False)
+    email_verified = Column(Boolean, nullable=False, default=False)
+    email_subscribed = Column(Boolean, nullable=False, default=True)
+    email_action = Column(String, nullable=True)
+    password = Column(String, nullable=True)  # nullable: OAuth users have no password
+    watched = Column(ARRAY(String))
+    watchlater = Column(ARRAY(String))
+    created_date = Column(DateTime, nullable=True)
+    email_verified_date = Column(DateTime, nullable=True)
+    email_lastsent_date = Column(DateTime, nullable=True)
+    updated = Column(DateTime, nullable=True)
+    navtabs = Column(ARRAY(String))
+    navtabs_index = Column(ARRAY(String))
+    username = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+    public = Column(Boolean, nullable=False, default=False)
+    view_counter = Column(Integer, nullable=True)
+    contributor = Column(Boolean, nullable=False, default=False)
+    settings = Column(MutableDict.as_mutable(JSON))
+    featured_playlist = Column(MutableDict.as_mutable(JSON))
+    playlists = relationship("Playlist", cascade="all", back_populates="user")
+    vpn_conns = relationship(
+        "VpnConn", cascade="all, delete-orphan", back_populates="user"
+    )
+
+    def __repr__(self):
+        return "<User %r>" % self.username
+
+    # Flask-Login interface — implemented without flask_login dependency
+    @property
+    def is_active(self):
+        return True
+
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_anonymous(self):
+        return False
+
+    def get_id(self):
+        return str(self.id)
+
+
+class Playlist(Base):
+    __tablename__ = "playlist"
+    id = Column(Integer, primary_key=True, nullable=False)
+    hashid = Column(String, nullable=False)
+    title = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+    videos = Column(ARRAY(String))
+    video_count = Column(Integer, nullable=True)
+    created = Column(DateTime, nullable=True)
+    updated = Column(DateTime, nullable=True)
+    public = Column(Boolean, nullable=False, default=True)
+    view_counter = Column(Integer, nullable=True)
+    user_id = Column(Integer, ForeignKey("altcen_user.id"), nullable=False)
+    featured_video = Column(MutableDict.as_mutable(JSON))
+    featured_video_id = Column(String, nullable=True)
+    user = relationship("User", back_populates="playlists")
+
+    def __repr__(self):
+        return "<Playlist %r>" % self.title
+
+
+class EmailList(Base):
+    __tablename__ = "email_list"
+    id = Column(Integer, primary_key=True, nullable=False)
+    email = Column(String, nullable=False)
+    username = Column(String, nullable=True)
+    firstname = Column(String, nullable=True)
+    lastname = Column(String, nullable=True)
+    email_source = Column(String, nullable=False)
+    email_subscribed = Column(Boolean, nullable=False, default=True)
+    email_action = Column(String, nullable=True)
+    created_date = Column(DateTime, nullable=True)
+    email_lastsent_date = Column(DateTime, nullable=True)
+    updated = Column(DateTime, nullable=True)
+
+
+class VpnNode(Base):
+    __tablename__ = "vpn_node"
+    name = Column(String, primary_key=True, nullable=False)
+    fqdn = Column(String, nullable=False)
+    publickey = Column(String)
+    privatekey = Column(String)
+    ipaddress = Column(String)
+    dns_ipaddress = Column(String)
+    free = Column(Boolean, nullable=False, default=False)
+
+
+class VpnConn(Base):
+    __tablename__ = "vpn_conn"
+    __table_args__ = (UniqueConstraint("vpn_node_name", "publickey"),)
+    vpn_node_name = Column(
+        String, ForeignKey("vpn_node.name"), primary_key=True, nullable=False
+    )
+    key_id = Column(Integer, primary_key=True)
+    publickey = Column(String, unique=True, nullable=False)
+    altcen_user_id = Column(Integer, ForeignKey("altcen_user.id"), nullable=False)
+    privatekey = Column(String, nullable=False)
+    sharedkey = Column(String, nullable=False)
+    bw_limit = Column(Integer)
+    bw_used = Column(Integer, nullable=False, default=0)
+    sub_expiry = Column(String)
+    expired = Column(Boolean, nullable=False, default=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    allowedips = Column(String)
+    dns = Column(String)
+    ipaddress = Column(String)
+    ipv4address = Column(String)
+    ipv6address = Column(String)
+    vpn_node_publickey = Column(String, nullable=False)
+    vpn_node_fqdn = Column(String, nullable=False)
+    config_file = Column(String)
+    config_qrcode = Column(String)
+    created = Column(DateTime, nullable=True)
+    user = relationship("User", back_populates="vpn_conns")
+
+
+class Crypto(Base):
+    __tablename__ = "crypto"
+    id = Column(Integer, primary_key=True, nullable=False)
+    name = Column(String, nullable=False)
+    tag = Column(String, nullable=False)
+    address = Column(String, nullable=False)
+
+
+class MvVideo(MaterializedView):
+    __tablename__ = "mv_video"
+    id = Column(Integer, nullable=False, unique=True)
+    prev = Column(DateTime, nullable=True)
+    extractor_data = Column(String, primary_key=True, nullable=False)
+    allow = Column(Boolean, nullable=False, default=True)
+    rating = Column(Integer, nullable=True)
+    published = Column(DateTime, nullable=True)
+    title = Column(String, nullable=True)
+    thumbnail = Column(String, nullable=True)
+    thumbnail_ac = Column(String, nullable=True)
+    yt_views = Column(Integer, nullable=True)
+    duration = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    tags = Column(String, nullable=True)
+    exists_ia = Column(Boolean, nullable=True)
+    restricted_ia = Column(Boolean, nullable=True)
+    exists_ac = Column(Boolean, nullable=True)
+    ac_views = Column(Integer, nullable=True)
+    videofile = Column(String, nullable=True)
+    dark_ia = Column(Boolean, nullable=True)
+    loggedin_ia = Column(Boolean, nullable=True)
+    novideo_ia = Column(Boolean, nullable=True)
+    ytc_title = Column(String, nullable=True)
+    ytc_id = Column(String, nullable=True)
+    document = Column(String, nullable=True)
+    yt_deleted_date = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return "<MvVideo %r>" % self.id
+
+
+class MvChannel(MaterializedView):
+    __tablename__ = "mv_channel"
+    id = Column(Integer, unique=True, nullable=False)
+    ytc_id = Column(String, primary_key=True, nullable=False)
+    ytc_title = Column(String, nullable=True)
+    ytc_publishedat = Column(DateTime, nullable=True)
+    ytc_thumbnail = Column(String, nullable=True)
+    ytc_thumbnailurl = Column(String, nullable=True)
+    ytc_viewcount = Column(Integer, nullable=True)
+    ytc_subscribercount = Column(Integer, nullable=True)
+    total = Column(Integer, nullable=True)
+    limited = Column(Integer, nullable=True)
+    archived = Column(Integer, nullable=True)
+    ytc_description = Column(String, nullable=True)
+    ytc_deleted = Column(Boolean, nullable=False, default=False)
+    ytc_archive = Column(Boolean, nullable=False, default=False)
+    allow = Column(Boolean, nullable=False, default=False)
+    was_full = Column(Boolean, nullable=False, default=False)
+    was_part = Column(Boolean, nullable=False, default=False)
+    delta = Column(DateTime, nullable=True)
+    delta_short = column_property(func.to_char(delta, 'dd'))
+    newest_video = Column(DateTime, nullable=True)
+    newest = column_property(func.to_char(newest_video, 'yyyy-mm-dd'))
+    ytc_deleteddate = Column(DateTime, nullable=True)
+    ytc_addeddate = Column(DateTime, nullable=True)
+    ytc_partarchive = Column(Boolean, nullable=False, default=False)
+    ytc_latestarchive = Column(Boolean, nullable=False, default=False)
+    ytc_moddate = Column(DateTime, nullable=True)
+    updated = column_property(func.to_char(ytc_moddate, 'yyyy-mm-dd'))
+    ytc_videocount = Column(Integer, nullable=True)
+
+    def __repr__(self):
+        return "<MvChannel %r>" % self.ytc_id
+
+    @hybrid_property
+    def archive(self):
+        return self.ytc_archive | self.ytc_partarchive | self.ytc_latestarchive
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'ytc_id': self.ytc_id,
+            'ytc_title': self.ytc_title,
+            'allow': str(self.allow)[0],
+            'total': self.total,
+            'archived': self.archived,
+            'limited': self.limited,
+            'newest': self.newest,
+            'delta': self.delta_short,
+            'ytc_archive': str(self.ytc_archive)[0],
+            'ytc_partarchive': str(self.ytc_partarchive)[0],
+            'was_full': str(self.was_full)[0],
+            'was_part': str(self.was_part)[0],
+            'updated': self.updated,
+            'ytc_videocount': self.ytc_videocount,
+        }
+
+
+class MvCategory(MaterializedView):
+    __tablename__ = "mv_category"
+    cat_id = Column(Integer, primary_key=True, unique=True, nullable=False)
+    cat_name = Column(String, unique=True, nullable=False)
+    cat_image = Column(String, nullable=False)
+    cat_count = Column(Integer, nullable=False)
+
+    def __repr__(self):
+        return "<MvCategory %r>" % self.cat_id
+
+
+class MvPlaylist(MaterializedView):
+    __tablename__ = "mv_playlist"
+    id = Column(Integer, primary_key=True, nullable=False)
+    hashid = Column(String, nullable=False)
+    title = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+    videos = Column(ARRAY(Integer))
+    video_count = Column(Integer, nullable=True)
+    created = Column(DateTime, nullable=True)
+    updated = Column(DateTime, nullable=True)
+    public = Column(Boolean, nullable=False, default=True)
+    view_counter = Column(Integer, nullable=True)
+    user_id = Column(Integer, ForeignKey("altcen_user.id"), nullable=False)
+    featured_video = Column(MutableDict.as_mutable(JSON))
+    featured_video_id = Column(String, nullable=True)
+    user = relationship("User", backref="mv_playlist")
+
+    def __repr__(self):
+        return "<MvPlaylist %r>" % self.id
+
+
+class MvAltcenUser(MaterializedView):
+    __tablename__ = "mv_altcen_user"
+    id = Column(Integer, primary_key=True, nullable=False)
+    username = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+    public = Column(Boolean, nullable=False, default=False)
+    view_counter = Column(Integer, nullable=True)
+    featured_playlist = Column(MutableDict.as_mutable(JSON))
+
+    def __repr__(self):
+        return "<MvAltcenUser %r>" % self.id
