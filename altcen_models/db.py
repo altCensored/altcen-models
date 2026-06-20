@@ -112,6 +112,7 @@ Sources_to_Videos = Table(
         ForeignKey("video.id", onupdate="CASCADE", ondelete="CASCADE"),
         index=True,
     ),
+    UniqueConstraint("video_id", "source_id", name="content_video_source_unique"),
 )
 
 
